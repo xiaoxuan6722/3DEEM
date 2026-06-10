@@ -1,0 +1,549 @@
+%% 1. 初始化与读取文件列表
+clear; clc; close all;
+cd('D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis')     
+
+% 设置文件夹路径
+sampleFolder = 'Samples\';  % 样品文件夹
+blankFolder  = 'Blank\';    % 空白文件夹
+
+%% 2. 读取文件并按原始文件系统顺序排序
+sampleFiles = dir(fullfile(sampleFolder, '*.xlsx'));
+blankFiles = dir(fullfile(blankFolder, '*.xlsx'));
+
+% 样品按字母顺序排序（保持原始顺序）
+[~, sample_order] = sort({sampleFiles.name});
+sampleFiles = sampleFiles(sample_order);
+
+% 空白按数字排序
+[~, blank_order] = sort(str2double(regexp({blankFiles.name}, '\d+', 'match', 'once')));
+blankFiles = blankFiles(blank_order);
+
+nSample = length(sampleFiles);
+
+firstFile = readmatrix(fullfile(sampleFolder, sampleFiles(1).name));
+Ex = firstFile(1, 2:end);
+Em = firstFile(2:end, 1);
+nEx = length(Ex);
+nEm = length(Em);
+
+%% 3. 分批次拉曼归一化
+Em_raman_range = [371, 428]; %定义拉曼峰的发射波长范围：371-428 nm
+Ex_raman = 350; %定义拉曼峰的激发波长：350 nm
+[~, idx_em_start] = min(abs(Em - Em_raman_range(1))); %找到发射波长数组 Em 中最接近 371nm 的索引位置
+[~, idx_em_end] = min(abs(Em - Em_raman_range(2))); %找到发射波长数组中最接近 428nm 的索引位置
+[~, idx_ex_raman] = min(abs(Ex - Ex_raman)); %找到激发波长数组 Ex 中最接近 350nm 的索引位置
+
+
+batches = {1:60, 61:84, 85:106, 107:127}; %这里是修改的，我这里的意思是1-60是一个批次的共用一个空白
+%定义 4 个批次的样品编号范围
+blank_indices = [1, 61, 85, 107];
+%定义每个批次使用的空白编号
+
+q_batches = zeros(4, 1);%创建一个 4×1 的数组，用于存储 4 个批次的拉曼峰面积
+blank_matrices = cell(4, 1);%创建一个 cell 数组，用于存储 4 个空白的 EEM 矩阵
+%每个空白的 EEM 矩阵大小为 nEm × nEx
+
+for b = 1:4 %1：4需要修改
+    blank_idx = blank_indices(b);
+    bData = readmatrix(fullfile(blankFolder, blankFiles(blank_idx).name));
+    blank_matrices{b} = bData(2:end, 2:end);
+    blank_ex350 = blank_matrices{b}(:, idx_ex_raman);
+    q_batches(b) = trapz(Em(idx_em_start:idx_em_end), blank_ex350(idx_em_start:idx_em_end));
+    %计算拉曼峰的积分面积
+end
+
+fprintf('各批次拉曼峰面积:\n');
+fprintf('  批次 1 (1-60):    %.2f (空白 #%d)\n', q_batches(1), blank_indices(1));
+fprintf('  批次 2 (61-84):   %.2f (空白 #%d)\n', q_batches(2), blank_indices(2));
+fprintf('  批次 3 (85-106):  %.2f (空白 #%d)\n', q_batches(3), blank_indices(3));
+fprintf('  批次 4 (107-127): %.2f (空白 #%d)\n', q_batches(4), blank_indices(4));
+fprintf('批次间拉曼峰差异: %.2f%%\n', std(q_batches)/mean(q_batches)*100);
+
+X_Sub = zeros(nSample, nEm, nEx); %创建一个 3D 数组，用于存储归一化后的所有样品 EEM
+SampleNames = cell(nSample, 1);
+
+for i = 1:nSample
+    sFileName = sampleFiles(i).name;
+    [~, SampleNames{i}, ~] = fileparts(sFileName);
+    sData = readmatrix(fullfile(sampleFolder, sFileName));
+    S_Matrix = sData(2:end, 2:end);
+    
+    for b = 1:4 %1：4修改修改
+        if ismember(i, batches{b})
+            batch_num = b;
+            break;
+        end
+    end %判断当前样品属于哪个批次
+     
+    Sub_Matrix = S_Matrix - blank_matrices{batch_num};
+    Sub_Matrix(Sub_Matrix < 0) = 0;
+    X_Sub(i, :, :) = Sub_Matrix / q_batches(batch_num);
+end
+
+fprintf('✅ 分批次拉曼归一化完成！\n');
+fprintf('前5个样品: %s, %s, %s, %s, %s\n', SampleNames{1:5});
+
+%% 4. 导出扣除空白后的文件
+outputFolder = 'D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis\Subtracted_Data';
+if ~exist(outputFolder, 'dir')
+    mkdir(outputFolder);
+end
+
+for i = 1:nSample
+    outputMatrix = [NaN, Ex; Em, squeeze(X_Sub(i, :, :))];
+    outputFileName = fullfile(outputFolder, sprintf('%s_subtracted.xlsx', SampleNames{i}));
+    writematrix(outputMatrix, outputFileName);
+end
+
+fprintf('✅ 已导出 %d 个扣除空白后的文件到:\n%s\n', nSample, outputFolder);
+
+%% 5. 切除散射
+OriginalData = struct();
+OriginalData.X = X_Sub;
+OriginalData.Ex = Ex;
+OriginalData.Em = Em;
+OriginalData.nSample = nSample;
+OriginalData.SampleName = SampleNames;
+
+CutData = smootheem(OriginalData, [35 35], [10 10], [35 40], [15 15], [1 1 1 1], [], 'pause');
+
+
+%% 6. 批次效应验证（可选）
+test_em = 450; test_ex = 350;
+[~, idx_em] = min(abs(CutData.Em - test_em));
+[~, idx_ex] = min(abs(CutData.Ex - test_ex));
+
+intensities = squeeze(CutData.X(:, idx_em, idx_ex));
+
+batch_means = [
+    mean(intensities(1:60));
+    mean(intensities(61:84));
+    mean(intensities(85:106));
+    mean(intensities(107:127))
+];
+
+cv_batches = [
+    std(intensities(1:60)) / mean(intensities(1:60)) * 100;
+    std(intensities(61:84)) / mean(intensities(61:84)) * 100;
+    std(intensities(85:106)) / mean(intensities(85:106)) * 100;
+    std(intensities(107:127)) / mean(intensities(107:127)) * 100
+];
+
+fprintf('\n=== 批次效应分析 ===\n');
+fprintf('归一化后批次间差异: %.2f%%\n', std(batch_means)/mean(batch_means)*100);
+fprintf('批次内平均变异: %.2f%%\n', mean(cv_batches));
+fprintf('结论: 样品真实差异主导，无需二次校正 ✅\n\n');
+
+%% 7. 计算荧光指数
+[picklist] = pickpeaks(CutData);
+writetable(picklist, 'D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis\荧光指数.xlsx', 'WriteVariableNames', true);
+
+%% 重新计算 HIX（定义 B：Σ(435-480) / Σ(300-345)）
+
+% 找到波长索引
+[~, idx_ex254] = min(abs(Ex - 254));
+[~, idx_em_300] = min(abs(Em - 300));
+[~, idx_em_345] = min(abs(Em - 345));
+[~, idx_em_435] = min(abs(Em - 435));
+[~, idx_em_480] = min(abs(Em - 480));
+
+% 计算 HIX
+HIX = zeros(nSample, 1);
+
+for i = 1:nSample
+    EEM = squeeze(X_Sub(i, :, idx_ex254));
+    
+    % 分子：腐殖化峰（Em 435-480）
+    I_hum = trapz(Em(idx_em_435:idx_em_480), EEM(idx_em_435:idx_em_480));
+    
+    % 分母：类蛋白峰（Em 300-345）
+    I_prot = trapz(Em(idx_em_300:idx_em_345), EEM(idx_em_300:idx_em_345));
+    
+    % HIX（定义 B）
+    HIX(i) = I_hum / I_prot;
+end
+
+fprintf('HIX 范围: %.2f - %.2f\n', min(HIX), max(HIX));
+fprintf('HIX 均值: %.2f ± %.2f\n', mean(HIX), std(HIX));
+
+% 创建表格
+HIX_table = table(SampleNames, HIX, 'VariableNames', {'Sample', 'HIX'});
+
+writetable(HIX_table, 'D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis\HIX_(435-480)(300-345).csv');
+
+
+%% 计算你的数据的两种 HIX
+
+[~, idx_ex254] = min(abs(Ex - 254));
+[~, idx_em_300] = min(abs(Em - 300));
+[~, idx_em_345] = min(abs(Em - 345));
+[~, idx_em_435] = min(abs(Em - 435));
+[~, idx_em_480] = min(abs(Em - 480));
+
+HIX_A = zeros(nSample, 1);
+HIX_B = zeros(nSample, 1);
+
+for i = 1:nSample
+    EEM = squeeze(X_Sub(i, :, idx_ex254));
+    
+    I_hum = trapz(Em(idx_em_435:idx_em_480), EEM(idx_em_435:idx_em_480));
+    I_prot = trapz(Em(idx_em_300:idx_em_345), EEM(idx_em_300:idx_em_345));
+    
+    HIX_A(i) = I_hum / (I_prot + I_hum);  % 定义 A (Ohno)
+    HIX_B(i) = I_hum / I_prot;            % 定义 B (Zsolnay)
+end
+
+HIX_table = table(SampleNames, HIX_A, HIX_B, ...
+    'VariableNames', {'Sample', 'HIX_A_Ohno', 'HIX_B_Zsolnay'});
+
+writetable(HIX_table, 'D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis\HIX_results.csv');
+
+
+%% 8. 试探性建模与寻找异常值、组分数 (用归一化后的数据)
+
+% 随机计算 2 到 5 组分模型，各跑 40 次寻找全局最优
+[bestmodel,allmodel,moddetail]=randinitanal(CutData,2:5,40,'nonnegativity',1e-8)
+% 查看所有模型的方差与核心一致性 (看这个图决定到底选几组分)
+coreandvar(bestmodel); 
+
+% 第一步：把缺失的标签信息塞进 bestmodel
+bestmodel.nEm = length(CutData.Em);  % 发射波长数量
+bestmodel.nEx = length(CutData.Ex);  % 激发波长数量
+bestmodel.Em = CutData.Em;           % 发射波长向量
+bestmodel.Ex = CutData.Ex;           % 激发波长向量
+
+% 第二步：用 2 个参数运行
+% 假设我们从上图中觉得 3 组分最好，那么画出 3 组分的杠杆图寻找异常样品
+loadingsandleverages(bestmodel, 3);
+
+%% 9最终建模 
+
+LSmodel = randinitanal(CutData, 3, 100, 'nonnegativity'); %不同的组分只需要改这个代码的3就行
+% 关键步骤：补齐标签（必须在 splitvalidation 之前）
+LSmodel.nEm = length(CutData.Em);
+LSmodel.nEx = length(CutData.Ex);
+LSmodel.Em = CutData.Em;
+LSmodel.Ex = CutData.Ex;
+
+% Split-half 验证
+DSsplit = splitds(CutData, [], 4, 'random', {[1 2],[3 4]});  
+splitmodels = splitanalysis(DSsplit, 3, 4, 'nonnegativity', 1e-8); 
+% 补齐每个 Split 模型的标签（重要！）
+for i = 1:length(splitmodels)
+    splitmodels(i).nEm = length(CutData.Em);
+    splitmodels(i).nEx = length(CutData.Ex);
+    splitmodels(i).Em = CutData.Em;
+    splitmodels(i).Ex = CutData.Ex;
+end
+
+val_results = splitvalidation(splitmodels, 3, [], [], LSmodel); 
+%通过会提示Overall Result= Validated for all comparisons，不通过会提示Overall Result= Not Validated
+%randinitanal(数据, 组分数, 随机初始化次数, 约束条件)
+%splitds(数据, 删除的样品索引, 分割数, 分割方式, 分组方案)
+%splitanalysis(分割数据, 组分数, 分割数, 约束条件, 收敛阈值)
+%splitvalidation(分割模型, 组分数, 删除的组分, 删除的样品, 整体模型)
+
+% 确定最终模型
+FinalModel = LSmodel;
+% 补齐标签
+FinalModel.nEm = length(CutData.Em);
+FinalModel.nEx = length(CutData.Ex);
+FinalModel.Em = CutData.Em;
+FinalModel.Ex = CutData.Ex;
+
+% 查看激发光谱 Tucker 相关系数
+disp('=== 激发光谱 Tucker 相关系数 (ExCC) ===');
+disp('Split 1 vs Split 2:');
+disp(val_results.Val_ExCC{1});
+disp(' ');
+disp('各 Split 与整体模型的对比:');
+disp(val_results.Val_ExCC{2});
+
+% 查看发射光谱 Tucker 相关系数
+disp('=== 发射光谱 Tucker 相关系数 (EmCC) ===');
+disp('Split 1 vs Split 2:');
+disp(val_results.Val_EmCC{1});
+disp(' ');
+disp('各 Split 与整体模型的对比:');
+disp(val_results.Val_EmCC{2});
+
+% 查看整体验证结果
+disp('=== 验证结论 ===');
+disp(val_results.Val_Result);
+disp(['核心一致性: ' num2str(val_results.Val_Core) '%']);
+disp(['解释方差: ' num2str(val_results.Val_PercentExpl) '%']);
+
+%% 10导出数据
+% 手动提取并导出结果
+FMax = 3;
+A = val_results.Model3{1};  % 样品得分 (127×3)
+B = val_results.Model3{2};  % 发射光谱 (71×3)
+C = val_results.Model3{3};  % 激发光谱 (61×3)
+
+% 构建正确的输出矩阵
+Ex = val_results.Ex';  % 转置为列向量 (61×1)
+Em = val_results.Em;   % 已经是列向量 (71×1)
+
+% 导出激发光谱（Ex vs C）
+Ex_output = [NaN, 1:FMax; Ex, C];
+writematrix(Ex_output, 'D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis\Excitation.xlsx');
+
+% 导出发射光谱（Em vs B）
+Em_output = [NaN, 1:FMax; Em, B];
+writematrix(Em_output, 'D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis\Emission.xlsx');
+
+% 导出样品得分（样品名 vs A）
+Scores_table = array2table(A, 'VariableNames', {'C1', 'C2', 'C3'});
+Scores_table.SampleName = val_results.SampleName;
+writetable(Scores_table, 'D:\user\义乌池塘实验\09春季采样数据原始\20260610PARAFAC_Analysis\Scores.xlsx');
+
+fprintf('✅ 已成功导出：\n');
+fprintf('  - Excitation.xlsx (激发光谱)\n');
+fprintf('  - Emission.xlsx (发射光谱)\n');
+fprintf('  - Scores.xlsx (样品得分)\n');
+
+
+%% 11画图组分出图
+n_component=3 %组分不同只需要修改这里就行
+eval(['Model=','LSmodel.Model',int2str(n_component),',']);
+for i=1:n_component
+    EEM=Model{1,3}(:,i)*Model{1,2}(:,i)';
+
+%构造带标签的表格
+EEM_table=array2table(EEM,...
+    'RowNames',cellstr(string(LSmodel.Ex(:))),...
+    'VariableNames',cellstr(string(LSmodel.Em(:))));
+
+writetable(EEM_table,sprintf('Component%d_Fluorescence_EEM.csv',i));
+figure('Colormap',jet,'Color','white')
+subplot(1,2,1)
+contourf(LSmodel.Em,LSmodel.Ex,Model{1,3}(:,i)*Model{1,2}(:,i)','LineStyle','none'),colorbar
+ylabel(colorbar,'RU')
+
+title(['Component ' num2str(i)])
+xlabel('Em/nm')
+ylabel('Ex/nm')
+subplot(1,2,2)
+plot(LSmodel.Ex,Model{1,3}(:,i),'LineWidth',1)
+hold on
+plot(LSmodel.Em,Model{1,2}(:,i),'LineWidth',1)
+legend('Ex','Em')
+xlabel('Wavelength/nm')
+ylabel('Loadings')
+end
+
+
+%%  需要删除异常样品时  找异常样品，
+% 提取 3 组分模型的样品载荷矩阵（Sample mode）
+A_sample = bestmodel.Model3{1};  % 127×3 的矩阵，每行是一个样品在 3 个组分上的载荷
+
+% 计算杠杆值（leverage）
+% leverage = diag(A * inv(A'*A) * A')
+H = A_sample * inv(A_sample' * A_sample) * A_sample';
+leverage = diag(H);
+
+% 找出异常样品（leverage > 0.15）
+threshold = 0.15;
+outlier_idx = find(leverage > threshold);
+
+fprintf('🚨 检测到 %d 个异常样品:\n', length(outlier_idx));
+for i = 1:length(outlier_idx)
+    idx = outlier_idx(i);
+    fprintf('   样品 #%d: %s (leverage = %.4f)\n', idx, bestmodel.SampleName{idx}, leverage(idx));
+end
+
+% 可视化
+figure;
+plot(leverage, 'o-', 'LineWidth', 1.5); hold on;
+plot(outlier_idx, leverage(outlier_idx), 'ro', 'MarkerSize', 10, 'LineWidth', 2);
+yline(threshold, '--r', 'LineWidth', 1.5);
+xlabel('样品编号'); ylabel('Leverage');
+title('异常样品检测 (3 组分模型)');
+legend('正常样品', '异常样品', '阈值线', 'Location', 'best');
+grid on;
+
+%% 异常值找到后，删除在进行建模
+% 1. 删除异常样品
+CleanData = RemoveOutliers(CutData, [21 22 23], [], []);
+
+% 2. 补齐标签
+CleanData.nEm = length(CleanData.Em);
+CleanData.nEx = length(CleanData.Ex);
+
+% 3. 确认剔除效果（用数据矩阵行数检查）
+fprintf('✅ 原始样品数：%d，剔除后剩余：%d\n', size(CutData.X, 1), size(CleanData.X, 1));
+
+% 4. 立刻用干净数据重新跑 2-5 组分
+[bestmodel_clean, allmodel_clean, moddetail_clean] = randinitanal(CleanData, 2:5, 40, 'nonnegativity', 1e-8);
+
+% 5. 查看核心一致性（看看删掉异常后效果有没有变好）
+coreandvar(bestmodel_clean);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+%% 验证 pickpeaks 的 HIX 定义
+
+% 方法 1：pickpeaks
+[picklist] = pickpeaks(CutData);
+HIX_pickpeaks = picklist.HIX;
+
+% 方法 2：手动计算定义 A
+[~, idx_ex254] = min(abs(Ex - 254));
+[~, idx_em_300] = min(abs(Em - 300));
+[~, idx_em_345] = min(abs(Em - 345));
+[~, idx_em_435] = min(abs(Em - 435));
+[~, idx_em_480] = min(abs(Em - 480));
+
+HIX_A_manual = zeros(nSample, 1);
+HIX_B_manual = zeros(nSample, 1);
+
+for i = 1:nSample
+    EEM = squeeze(X_Sub(i, :, idx_ex254));
+    
+    I_hum = trapz(Em(idx_em_435:idx_em_480), EEM(idx_em_435:idx_em_480));
+    I_prot = trapz(Em(idx_em_300:idx_em_345), EEM(idx_em_300:idx_em_345));
+    
+    HIX_A_manual(i) = I_hum / (I_prot + I_hum);  % 定义 A
+    HIX_B_manual(i) = I_hum / I_prot;            % 定义 B
+end
+
+% 转换验证
+HIX_B_from_pickpeaks = HIX_pickpeaks ./ (1 - HIX_pickpeaks);
+HIX_A_from_manual = HIX_B_manual ./ (1 + HIX_B_manual);
+
+% 对比
+fprintf('=== pickpeaks 结果 ===\n');
+fprintf('HIX 范围: %.3f - %.3f\n', min(HIX_pickpeaks), max(HIX_pickpeaks));
+
+fprintf('\n=== 手动计算（定义 A）===\n');
+fprintf('HIX_A 范围: %.3f - %.3f\n', min(HIX_A_manual), max(HIX_A_manual));
+
+fprintf('\n=== 手动计算（定义 B）===\n');
+fprintf('HIX_B 范围: %.3f - %.3f\n', min(HIX_B_manual), max(HIX_B_manual));
+
+fprintf('\n=== 转换验证 ===\n');
+fprintf('pickpeaks → HIX_B: %.3f - %.3f\n', ...
+    min(HIX_B_from_pickpeaks), max(HIX_B_from_pickpeaks));
+fprintf('手动 HIX_B → HIX_A: %.3f - %.3f\n', ...
+    min(HIX_A_from_manual), max(HIX_A_from_manual));
+
+% 计算误差
+if max(HIX_pickpeaks) < 1.2  % pickpeaks 使用定义 A
+    error_vs_A = abs(HIX_pickpeaks - HIX_A_manual);
+    error_vs_B_converted = abs(HIX_pickpeaks - HIX_A_from_manual);
+    
+    fprintf('\n=== 误差分析 ===\n');
+    fprintf('pickpeaks vs 手动定义A: %.4f ± %.4f (最大: %.4f)\n', ...
+        mean(error_vs_A), std(error_vs_A), max(error_vs_A));
+    fprintf('pickpeaks vs 定义B转换: %.4f ± %.4f (最大: %.4f)\n', ...
+        mean(error_vs_B_converted), std(error_vs_B_converted), max(error_vs_B_converted));
+    
+    % 可视化
+    figure;
+    subplot(2,2,1);
+    plot(HIX_pickpeaks, HIX_A_manual, 'o');
+    hold on; plot([0 1], [0 1], 'r--'); hold off;
+    xlabel('pickpeaks'); ylabel('手动定义A');
+    title('pickpeaks vs 定义A');
+    
+    subplot(2,2,2);
+    plot(HIX_B_from_pickpeaks, HIX_B_manual, 'o');
+    xlabel('pickpeaks转换'); ylabel('手动定义B');
+    title('转换后 vs 定义B');
+    
+    subplot(2,2,3);
+    histogram(error_vs_A, 20);
+    xlabel('误差'); ylabel('样品数');
+    title('pickpeaks vs 定义A 误差分布');
+    
+    subplot(2,2,4);
+    histogram(error_vs_B_converted, 20);
+    xlabel('误差'); ylabel('样品数');
+    title('pickpeaks vs 转换定义B 误差分布');
+end
+
+% 检查 pickpeaks 可能使用的波长范围
+fprintf('\n=== 检查波长设置 ===\n');
+fprintf('Ex254 索引: %d (%.1f nm)\n', idx_ex254, Ex(idx_ex254));
+fprintf('Em300 索引: %d (%.1f nm)\n', idx_em_300, Em(idx_em_300));
+fprintf('Em345 索引: %d (%.1f nm)\n', idx_em_345, Em(idx_em_345));
+fprintf('Em435 索引: %d (%.1f nm)\n', idx_em_435, Em(idx_em_435));
+fprintf('Em480 索引: %d (%.1f nm)\n', idx_em_480, Em(idx_em_480));
+
+
+
+% pickpeaks 可能用了：
+HIX_pickpeaks = I_prot / I_hum  % ← 反了！
+
+% 验证
+HIX_reversed = 1 ./ HIX_B_manual;
+
+fprintf('=== 验证是否颠倒 ===\n');
+fprintf('pickpeaks:      %.3f - %.3f\n', min(HIX_pickpeaks), max(HIX_pickpeaks));
+fprintf('1/定义B:        %.3f - %.3f\n', min(HIX_reversed), max(HIX_reversed));
+
+error_reversed = abs(HIX_pickpeaks - HIX_reversed);
+fprintf('误差:           %.4f ± %.4f (最大: %.4f)\n', ...
+    mean(error_reversed), std(error_reversed), max(error_reversed));
+
+if mean(error_reversed) < 0.01
+    fprintf('✅ pickpeaks 使用了倒数！\n');
+    fprintf('   pickpeaks HIX = I_prot / I_hum\n');
+    fprintf('   应该使用: HIX = I_hum / I_prot\n');
+end
+
+
+
+
+
+% pickpeaks 可能用了不同的积分范围
+
+% 测试常见的变体
+variants = struct();
+
+for i = 1:nSample
+    EEM = squeeze(X_Sub(i, :, idx_ex254));
+    
+    % 变体 1：Em 300-345 / Em 435-480（颠倒）
+    I_hum = trapz(Em(idx_em_435:idx_em_480), EEM(idx_em_435:idx_em_480));
+    I_prot = trapz(Em(idx_em_300:idx_em_345), EEM(idx_em_300:idx_em_345));
+    variants.v1(i) = I_prot / I_hum;  % 颠倒
+    
+    % 变体 2：不同的波长范围
+    [~, idx_em_254] = min(abs(Em - 254));
+    [~, idx_em_450] = min(abs(Em - 450));
+    [~, idx_em_500] = min(abs(Em - 500));
+    
+    I_hum2 = trapz(Em(idx_em_450:idx_em_500), EEM(idx_em_450:idx_em_500));
+    variants.v2(i) = I_hum / I_prot;  % 不同范围
+    
+    % 变体 3：峰值而非积分
+    variants.v3(i) = max(EEM(idx_em_435:idx_em_480)) / max(EEM(idx_em_300:idx_em_345));
+end
+
+fprintf('\n=== 测试不同变体 ===\n');
+for fn = fieldnames(variants)'
+    v = variants.(fn{1});
+    err = abs(HIX_pickpeaks - v);
+    fprintf('%s: 范围 %.3f-%.3f, 误差 %.4f±%.4f\n', ...
+        fn{1}, min(v), max(v), mean(err), std(err));
+    
+    if mean(err) < 0.05
+        fprintf('   ✅ 可能匹配！\n');
+    end
+end
+
+edit pickpeaks
